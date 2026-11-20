@@ -398,3 +398,9 @@ def comando():
 @app.get("/")
 def saude():
     return jsonify({"status": "ok", "modelo": MODEL})
+
+
+# A Vercel reescreve todas as rotas para /api/index; aqui POST vira comando e GET vira checagem
+@app.route("/<path:_caminho>", methods=["GET", "POST"])
+def qualquer_rota(_caminho):
+    return comando() if request.method == "POST" else saude()
