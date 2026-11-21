@@ -335,8 +335,9 @@ Spotify não existe mais, então as sugestões são suas.
 - Para tocar várias músicas, prefira 'tocar' com a lista de uris (tocam em sequência). Use \
 'adicionar_a_fila' quando ele pedir fila ou "depois dessa".
 - "Essa música" se refere ao que está tocando: confira com 'estado_reproducao'.
-- Se der erro de dispositivo inativo, tente 'dispositivos' e 'transferir_reproducao'; se não houver \
-nenhum, avise para abrir o Spotify.
+- Se der erro de dispositivo inativo, use 'dispositivos' e toque passando o dispositivo_id do iPhone \
+(type Smartphone). Se o iPhone não aparecer na lista, não toque em outro aparelho: avise em uma frase \
+que o app do Spotify precisa estar aberto no iPhone.
 - A API não permite remover nem reordenar a fila; se pedirem, explique em uma frase.
 
 Resposta final: UMA frase curta em português do Brasil, natural para ser falada em voz alta pela Siri. \
@@ -346,12 +347,14 @@ cliente = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 
 
 def processar(pedido: str) -> str:
+    print(f"PEDIDO: {pedido}", flush=True)
     mensagens = [{"role": "user", "content": pedido}]
     for _ in range(MAX_PASSOS):
         resp = cliente.messages.create(
             model=MODEL, max_tokens=1500, system=SISTEMA, tools=FERRAMENTAS, messages=mensagens)
         if resp.stop_reason != "tool_use":
             texto = " ".join(b.text for b in resp.content if b.type == "text").strip()
+            print(f"RESPOSTA: {texto}", flush=True)
             return texto or "Feito."
         mensagens.append({"role": "assistant", "content": resp.content})
         resultados = []
@@ -362,6 +365,8 @@ def processar(pedido: str) -> str:
                 saida = enxugar(executar(bloco.name, bloco.input))
             except Exception as e:  # erro de rede, campo faltando etc.
                 saida = {"erro": f"{type(e).__name__}: {e}"}
+            print(f"FERRAMENTA {bloco.name} {json.dumps(bloco.input, ensure_ascii=False)[:200]} -> "
+                  f"{json.dumps(saida, ensure_ascii=False)[:300]}", flush=True)
             resultados.append({
                 "type": "tool_result",
                 "tool_use_id": bloco.id,
