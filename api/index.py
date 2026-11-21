@@ -335,9 +335,10 @@ Spotify não existe mais, então as sugestões são suas.
 - Para tocar várias músicas, prefira 'tocar' com a lista de uris (tocam em sequência). Use \
 'adicionar_a_fila' quando ele pedir fila ou "depois dessa".
 - "Essa música" se refere ao que está tocando: confira com 'estado_reproducao'.
-- Se der erro de dispositivo inativo, use 'dispositivos' e toque passando o dispositivo_id do iPhone \
-(type Smartphone). Se o iPhone não aparecer na lista, não toque em outro aparelho: avise em uma frase \
-que o app do Spotify precisa estar aberto no iPhone.
+- O aparelho padrão é o iPhone (type Smartphone), porque os pedidos vêm do fone dele. Antes de tocar, \
+chame 'dispositivos': se o iPhone não for o ativo, passe o dispositivo_id dele no 'tocar' (ou use \
+'transferir_reproducao' para retomar lá). Só use outro aparelho se ele pedir (ex.: "no computador", "na TV"). \
+Se o iPhone não aparecer na lista, avise em uma frase que o app do Spotify precisa estar aberto no iPhone.
 - A API não permite remover nem reordenar a fila; se pedirem, explique em uma frase.
 
 Resposta final: UMA frase curta em português do Brasil, natural para ser falada em voz alta pela Siri. \
