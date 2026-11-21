@@ -1,10 +1,12 @@
 """
-Claude Música: controla o Spotify por voz via Claude.
+Claude Música: control Spotify by voice through Claude.
 
-Endpoint principal: POST /api/comando
+Main endpoint: POST /api/comando
   Header:  Authorization: Bearer <APP_SECRET>
-  Body:    {"pedido": "toca algo parecido com Tame Impala"}
-  Retorno: {"resposta": "Tocando The Less I Know The Better."}
+  Body:    {"pedido": "play something like Tame Impala"}
+  Returns: {"resposta": "Playing The Less I Know The Better."}
+
+(The "pedido"/"resposta" field names are kept for compatibility with existing iPhone Shortcuts.)
 """
 
 import base64
@@ -21,19 +23,19 @@ app = Flask(__name__)
 
 API = "https://api.spotify.com/v1"
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5")
-MAX_PASSOS = 10  # limite de rodadas de ferramentas por pedido
+MAX_STEPS = 10  # max tool-use rounds per request
 
-_token = {"valor": None, "expira": 0.0}
+_token = {"value": None, "expires": 0.0}
 
 
 # --------------------------------------------------------------------------
-# Spotify: autenticação e chamadas
+# Spotify: auth and requests
 # --------------------------------------------------------------------------
 
-def token_spotify() -> str:
-    """Renova o access token a partir do refresh token (cacheado por ~55 min)."""
-    if _token["valor"] and time.time() < _token["expira"]:
-        return _token["valor"]
+def spotify_token() -> str:
+    """Refresh the access token from the refresh token (cached for ~55 min)."""
+    if _token["value"] and time.time() < _token["expires"]:
+        return _token["value"]
     cred = f"{os.environ['SPOTIFY_CLIENT_ID']}:{os.environ['SPOTIFY_CLIENT_SECRET']}"
     r = requests.post(
         "https://accounts.spotify.com/api/token",
@@ -42,26 +44,26 @@ def token_spotify() -> str:
         timeout=10,
     )
     r.raise_for_status()
-    dados = r.json()
-    _token["valor"] = dados["access_token"]
-    _token["expira"] = time.time() + dados.get("expires_in", 3600) - 300
-    return _token["valor"]
+    data = r.json()
+    _token["value"] = data["access_token"]
+    _token["expires"] = time.time() + data.get("expires_in", 3600) - 300
+    return _token["value"]
 
 
-def sp(metodo: str, caminho: str, params=None, corpo=None):
-    """Chama a API do Spotify e devolve o JSON (ou um status curto)."""
+def sp(method: str, path: str, params=None, body=None):
+    """Call the Spotify API and return the JSON (or a short status)."""
     r = requests.request(
-        metodo,
-        API + caminho,
+        method,
+        API + path,
         params={k: v for k, v in (params or {}).items() if v is not None},
-        json=corpo,
-        headers={"Authorization": f"Bearer {token_spotify()}"},
+        json=body,
+        headers={"Authorization": f"Bearer {spotify_token()}"},
         timeout=15,
     )
-    if r.status_code == 404 and caminho.startswith("/me/player"):
-        return {"erro": "Nenhum dispositivo ativo. Peça para abrir o Spotify ou use transferir_reproducao."}
+    if r.status_code == 404 and path.startswith("/me/player"):
+        return {"error": "No active device. Ask the user to open Spotify, or use transfer_playback."}
     if r.status_code >= 400:
-        return {"erro": r.status_code, "detalhe": r.text[:300]}
+        return {"error": r.status_code, "detail": r.text[:300]}
     if r.status_code == 204 or not r.content:
         return {"ok": True}
     try:
@@ -70,8 +72,8 @@ def sp(metodo: str, caminho: str, params=None, corpo=None):
         return {"ok": True}
 
 
-# Campos que só gastam tokens do Claude e não ajudam a decidir nada
-DESCARTAR = {
+# Fields that only cost tokens and don't help the model decide anything
+DROP = {
     "available_markets", "images", "external_urls", "external_ids", "href",
     "preview_url", "is_local", "disc_number", "linked_from", "restrictions",
     "copyrights", "label", "popularity_label", "followers", "primary_color",
@@ -81,332 +83,333 @@ DESCARTAR = {
 }
 
 
-def enxugar(obj, profundidade=0):
-    """Remove ruído do JSON do Spotify e resume artistas a nomes."""
-    if profundidade > 6:
+def slim(obj, depth=0):
+    """Strip noise from Spotify JSON and collapse artists to names."""
+    if depth > 6:
         return "…"
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if k in DESCARTAR or v is None:
+            if k in DROP or v is None:
                 continue
             if k == "artists" and isinstance(v, list):
-                out["artistas"] = ", ".join(a.get("name", "") for a in v if isinstance(a, dict))
+                out["artists"] = ", ".join(a.get("name", "") for a in v if isinstance(a, dict))
                 continue
             if k == "album" and isinstance(v, dict):
                 out["album"] = v.get("name")
                 continue
             if k == "owner" and isinstance(v, dict):
-                out["dono"] = v.get("display_name") or v.get("id")
+                out["owner"] = v.get("display_name") or v.get("id")
                 continue
-            out[k] = enxugar(v, profundidade + 1)
+            out[k] = slim(v, depth + 1)
         return out
     if isinstance(obj, list):
-        return [enxugar(x, profundidade + 1) for x in obj]
+        return [slim(x, depth + 1) for x in obj]
     return obj
 
 
-def em_lotes(lista, tamanho):
-    for i in range(0, len(lista), tamanho):
-        yield lista[i:i + tamanho]
+def batches(items, size):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 # --------------------------------------------------------------------------
-# Ferramentas que o Claude pode usar
+# Tools available to Claude
 # --------------------------------------------------------------------------
 
-def _f(nome, descricao, props=None, obrigatorios=None):
+def _t(name, description, props=None, required=None):
     return {
-        "name": nome,
-        "description": descricao,
-        "input_schema": {"type": "object", "properties": props or {}, "required": obrigatorios or []},
+        "name": name,
+        "description": description,
+        "input_schema": {"type": "object", "properties": props or {}, "required": required or []},
     }
 
-URIS = {"type": "array", "items": {"type": "string"}, "description": "URIs do Spotify, ex. spotify:track:ID"}
+URIS = {"type": "array", "items": {"type": "string"}, "description": "Spotify URIs, e.g. spotify:track:ID"}
 
-FERRAMENTAS = [
-    _f("buscar", "Busca no catálogo do Spotify. Máximo 10 resultados por tipo.",
-       {"consulta": {"type": "string", "description": "Texto da busca. Aceita filtros como artist:Nome track:Nome year:1990"},
-        "tipos": {"type": "string", "description": "Separados por vírgula: track, album, artist, playlist, show, episode, audiobook. Padrão: track"},
-        "limite": {"type": "integer", "description": "1 a 10, padrão 5"}},
-       ["consulta"]),
-    _f("estado_reproducao", "O que está tocando agora, em qual dispositivo, volume, aleatório e repetição."),
-    _f("tocar", "Toca músicas. Use 'uris' para uma lista de faixas (tocam em sequência) OU 'contexto' para álbum, playlist ou artista. Sem argumentos, retoma a reprodução.",
+TOOLS = [
+    _t("search", "Search the Spotify catalog. At most 10 results per type.",
+       {"query": {"type": "string", "description": "Search text. Supports filters like artist:Name track:Name year:1990"},
+        "types": {"type": "string", "description": "Comma separated: track, album, artist, playlist, show, episode, audiobook. Default: track"},
+        "limit": {"type": "integer", "description": "1 to 10, default 5"}},
+       ["query"]),
+    _t("playback_state", "What is playing now, on which device, volume, shuffle and repeat."),
+    _t("play", "Play music. Use 'uris' for a list of tracks (played in order) OR 'context' for an album, playlist or artist. With no arguments, resumes playback.",
        {"uris": URIS,
-        "contexto": {"type": "string", "description": "URI de álbum, playlist ou artista"},
-        "comecar_na_posicao": {"type": "integer", "description": "Índice da faixa inicial dentro do contexto"},
-        "dispositivo_id": {"type": "string"}}),
-    _f("pausar", "Pausa a reprodução."),
-    _f("proxima", "Pula para a próxima faixa."),
-    _f("anterior", "Volta para a faixa anterior."),
-    _f("ir_para", "Avança ou volta para um ponto da faixa atual.",
-       {"posicao_ms": {"type": "integer"}}, ["posicao_ms"]),
-    _f("volume", "Define o volume (0 a 100). Alguns dispositivos, como iPhone, podem não aceitar.",
-       {"percentual": {"type": "integer"}}, ["percentual"]),
-    _f("aleatorio", "Liga ou desliga o modo aleatório.", {"ligado": {"type": "boolean"}}, ["ligado"]),
-    _f("repetir", "Modo de repetição.",
-       {"modo": {"type": "string", "enum": ["track", "context", "off"]}}, ["modo"]),
-    _f("adicionar_a_fila", "Adiciona faixas ou episódios ao fim da fila, na ordem dada.", {"uris": URIS}, ["uris"]),
-    _f("ver_fila", "Mostra a faixa atual e as próximas da fila. Obs.: a API não permite remover nem reordenar a fila."),
-    _f("dispositivos", "Lista os dispositivos Spotify disponíveis."),
-    _f("transferir_reproducao", "Muda a reprodução para outro dispositivo.",
-       {"dispositivo_id": {"type": "string"}, "tocar": {"type": "boolean"}}, ["dispositivo_id"]),
-    _f("tocadas_recentemente", "Últimas faixas ouvidas.", {"limite": {"type": "integer", "description": "1 a 50"}}),
-    _f("mais_ouvidas", "Artistas ou faixas mais ouvidas do usuário.",
-       {"tipo": {"type": "string", "enum": ["tracks", "artists"]},
-        "periodo": {"type": "string", "enum": ["short_term", "medium_term", "long_term"],
-                    "description": "short_term ≈ 4 semanas, medium_term ≈ 6 meses, long_term ≈ anos"},
-        "limite": {"type": "integer"}},
-       ["tipo"]),
-    _f("minhas_playlists", "Lista as playlists do usuário (com id e nome).",
-       {"limite": {"type": "integer"}, "offset": {"type": "integer"}}),
-    _f("itens_playlist", "Faixas de uma playlist (só funciona em playlists do usuário ou colaborativas).",
-       {"playlist_id": {"type": "string"}, "limite": {"type": "integer"}, "offset": {"type": "integer"}},
+        "context": {"type": "string", "description": "Album, playlist or artist URI"},
+        "start_at": {"type": "integer", "description": "Index of the first track within the context"},
+        "device_id": {"type": "string"}}),
+    _t("pause", "Pause playback."),
+    _t("next_track", "Skip to the next track."),
+    _t("previous_track", "Go back to the previous track."),
+    _t("seek", "Jump to a position in the current track.",
+       {"position_ms": {"type": "integer"}}, ["position_ms"]),
+    _t("set_volume", "Set the volume (0 to 100). Some devices, like iPhones, may not accept it.",
+       {"percent": {"type": "integer"}}, ["percent"]),
+    _t("set_shuffle", "Turn shuffle on or off.", {"on": {"type": "boolean"}}, ["on"]),
+    _t("set_repeat", "Repeat mode.",
+       {"mode": {"type": "string", "enum": ["track", "context", "off"]}}, ["mode"]),
+    _t("add_to_queue", "Add tracks or episodes to the end of the queue, in the given order.", {"uris": URIS}, ["uris"]),
+    _t("get_queue", "Show the current track and what's next in the queue. Note: the API cannot remove or reorder queue items."),
+    _t("devices", "List the available Spotify devices."),
+    _t("transfer_playback", "Move playback to another device.",
+       {"device_id": {"type": "string"}, "play": {"type": "boolean"}}, ["device_id"]),
+    _t("recently_played", "Recently played tracks.", {"limit": {"type": "integer", "description": "1 to 50"}}),
+    _t("top_items", "The user's top artists or tracks.",
+       {"type": {"type": "string", "enum": ["tracks", "artists"]},
+        "time_range": {"type": "string", "enum": ["short_term", "medium_term", "long_term"],
+                       "description": "short_term ≈ 4 weeks, medium_term ≈ 6 months, long_term ≈ years"},
+        "limit": {"type": "integer"}},
+       ["type"]),
+    _t("my_playlists", "List the user's playlists (with id and name).",
+       {"limit": {"type": "integer"}, "offset": {"type": "integer"}}),
+    _t("playlist_items", "Tracks in a playlist (only works for playlists the user owns or collaborates on).",
+       {"playlist_id": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}},
        ["playlist_id"]),
-    _f("criar_playlist", "Cria uma playlist nova e opcionalmente já adiciona faixas.",
-       {"nome": {"type": "string"}, "descricao": {"type": "string"},
-        "publica": {"type": "boolean", "description": "Padrão: false"}, "uris": URIS},
-       ["nome"]),
-    _f("adicionar_a_playlist", "Adiciona faixas a uma playlist.",
+    _t("create_playlist", "Create a new playlist and optionally add tracks right away.",
+       {"name": {"type": "string"}, "description": {"type": "string"},
+        "public": {"type": "boolean", "description": "Default: false"}, "uris": URIS},
+       ["name"]),
+    _t("add_to_playlist", "Add tracks to a playlist.",
        {"playlist_id": {"type": "string"}, "uris": URIS,
-        "posicao": {"type": "integer", "description": "Opcional, padrão é o fim"}},
+        "position": {"type": "integer", "description": "Optional, default is the end"}},
        ["playlist_id", "uris"]),
-    _f("remover_da_playlist", "Remove faixas de uma playlist.",
+    _t("remove_from_playlist", "Remove tracks from a playlist.",
        {"playlist_id": {"type": "string"}, "uris": URIS}, ["playlist_id", "uris"]),
-    _f("reordenar_playlist", "Move um bloco de faixas dentro da playlist.",
-       {"playlist_id": {"type": "string"}, "inicio": {"type": "integer"},
-        "inserir_antes": {"type": "integer"}, "quantidade": {"type": "integer", "description": "Padrão 1"}},
-       ["playlist_id", "inicio", "inserir_antes"]),
-    _f("editar_playlist", "Muda nome, descrição ou visibilidade de uma playlist.",
-       {"playlist_id": {"type": "string"}, "nome": {"type": "string"},
-        "descricao": {"type": "string"}, "publica": {"type": "boolean"}},
+    _t("reorder_playlist", "Move a block of tracks within a playlist.",
+       {"playlist_id": {"type": "string"}, "range_start": {"type": "integer"},
+        "insert_before": {"type": "integer"}, "range_length": {"type": "integer", "description": "Default 1"}},
+       ["playlist_id", "range_start", "insert_before"]),
+    _t("edit_playlist", "Change a playlist's name, description or visibility.",
+       {"playlist_id": {"type": "string"}, "name": {"type": "string"},
+        "description": {"type": "string"}, "public": {"type": "boolean"}},
        ["playlist_id"]),
-    _f("salvar_na_biblioteca", "Curte faixas, salva álbuns, segue playlists ou artistas (passe as URIs).",
+    _t("save_to_library", "Like tracks, save albums, follow playlists or artists (pass their URIs).",
        {"uris": URIS}, ["uris"]),
-    _f("remover_da_biblioteca", "Descurte faixas, remove álbuns, deixa de seguir playlists ou artistas.",
+    _t("remove_from_library", "Unlike tracks, remove albums, unfollow playlists or artists.",
        {"uris": URIS}, ["uris"]),
-    _f("esta_na_biblioteca", "Verifica se itens já estão salvos ou seguidos.", {"uris": URIS}, ["uris"]),
-    _f("musicas_curtidas", "Lista as músicas curtidas do usuário.",
-       {"limite": {"type": "integer"}, "offset": {"type": "integer"}}),
-    _f("artistas_seguidos", "Lista os artistas que o usuário segue.", {"limite": {"type": "integer"}}),
-    _f("albuns_do_artista", "Discografia de um artista.",
-       {"artista_id": {"type": "string"}, "tipos": {"type": "string", "description": "album,single,compilation"},
-        "limite": {"type": "integer"}},
-       ["artista_id"]),
-    _f("faixas_do_album", "Faixas de um álbum.", {"album_id": {"type": "string"}}, ["album_id"]),
+    _t("library_contains", "Check whether items are already saved or followed.", {"uris": URIS}, ["uris"]),
+    _t("liked_songs", "List the user's liked songs.",
+       {"limit": {"type": "integer"}, "offset": {"type": "integer"}}),
+    _t("followed_artists", "List the artists the user follows.", {"limit": {"type": "integer"}}),
+    _t("artist_albums", "An artist's discography.",
+       {"artist_id": {"type": "string"}, "groups": {"type": "string", "description": "album,single,compilation"},
+        "limit": {"type": "integer"}},
+       ["artist_id"]),
+    _t("album_tracks", "Tracks on an album.", {"album_id": {"type": "string"}}, ["album_id"]),
 ]
 
 
-def _id(valor: str) -> str:
-    """Aceita ID puro, URI (spotify:playlist:ID) ou link e devolve o ID."""
-    valor = valor.strip()
-    if valor.startswith("spotify:"):
-        return valor.split(":")[-1]
-    if "open.spotify.com" in valor:
-        return valor.rstrip("/").split("/")[-1].split("?")[0]
-    return valor
+def _id(value: str) -> str:
+    """Accept a raw ID, a URI (spotify:playlist:ID) or a link, and return the ID."""
+    value = value.strip()
+    if value.startswith("spotify:"):
+        return value.split(":")[-1]
+    if "open.spotify.com" in value:
+        return value.rstrip("/").split("/")[-1].split("?")[0]
+    return value
 
 
-def executar(nome: str, a: dict):
-    lim = lambda padrao, maximo: max(1, min(int(a.get("limite", padrao)), maximo))
+def run_tool(name: str, a: dict):
+    lim = lambda default, maximum: max(1, min(int(a.get("limit", default)), maximum))
 
-    if nome == "buscar":
-        return sp("GET", "/search", {"q": a["consulta"], "type": a.get("tipos", "track"), "limit": lim(5, 10)})
-    if nome == "estado_reproducao":
-        return sp("GET", "/me/player") or {"info": "Nada tocando"}
-    if nome == "tocar":
-        corpo = {}
+    if name == "search":
+        return sp("GET", "/search", {"q": a["query"], "type": a.get("types", "track"), "limit": lim(5, 10)})
+    if name == "playback_state":
+        return sp("GET", "/me/player") or {"info": "Nothing playing"}
+    if name == "play":
+        body = {}
         if a.get("uris"):
-            corpo["uris"] = a["uris"]
-        elif a.get("contexto"):
-            corpo["context_uri"] = a["contexto"]
-            if a.get("comecar_na_posicao") is not None:
-                corpo["offset"] = {"position": a["comecar_na_posicao"]}
-        return sp("PUT", "/me/player/play", {"device_id": a.get("dispositivo_id")}, corpo or None)
-    if nome == "pausar":
+            body["uris"] = a["uris"]
+        elif a.get("context"):
+            body["context_uri"] = a["context"]
+            if a.get("start_at") is not None:
+                body["offset"] = {"position": a["start_at"]}
+        return sp("PUT", "/me/player/play", {"device_id": a.get("device_id")}, body or None)
+    if name == "pause":
         return sp("PUT", "/me/player/pause")
-    if nome == "proxima":
+    if name == "next_track":
         return sp("POST", "/me/player/next")
-    if nome == "anterior":
+    if name == "previous_track":
         return sp("POST", "/me/player/previous")
-    if nome == "ir_para":
-        return sp("PUT", "/me/player/seek", {"position_ms": a["posicao_ms"]})
-    if nome == "volume":
-        return sp("PUT", "/me/player/volume", {"volume_percent": max(0, min(100, a["percentual"]))})
-    if nome == "aleatorio":
-        return sp("PUT", "/me/player/shuffle", {"state": "true" if a["ligado"] else "false"})
-    if nome == "repetir":
-        return sp("PUT", "/me/player/repeat", {"state": a["modo"]})
-    if nome == "adicionar_a_fila":
-        resultados = [sp("POST", "/me/player/queue", {"uri": u}) for u in a["uris"]]
-        erros = [r for r in resultados if "erro" in r]
-        return {"adicionadas": len(resultados) - len(erros), "erros": erros[:3]}
-    if nome == "ver_fila":
+    if name == "seek":
+        return sp("PUT", "/me/player/seek", {"position_ms": a["position_ms"]})
+    if name == "set_volume":
+        return sp("PUT", "/me/player/volume", {"volume_percent": max(0, min(100, a["percent"]))})
+    if name == "set_shuffle":
+        return sp("PUT", "/me/player/shuffle", {"state": "true" if a["on"] else "false"})
+    if name == "set_repeat":
+        return sp("PUT", "/me/player/repeat", {"state": a["mode"]})
+    if name == "add_to_queue":
+        results = [sp("POST", "/me/player/queue", {"uri": u}) for u in a["uris"]]
+        errors = [r for r in results if "error" in r]
+        return {"added": len(results) - len(errors), "errors": errors[:3]}
+    if name == "get_queue":
         r = sp("GET", "/me/player/queue")
         if isinstance(r, dict) and "queue" in r:
             r["queue"] = r["queue"][:15]
         return r
-    if nome == "dispositivos":
+    if name == "devices":
         return sp("GET", "/me/player/devices")
-    if nome == "transferir_reproducao":
-        return sp("PUT", "/me/player", corpo={"device_ids": [a["dispositivo_id"]], "play": a.get("tocar", True)})
-    if nome == "tocadas_recentemente":
+    if name == "transfer_playback":
+        return sp("PUT", "/me/player", body={"device_ids": [a["device_id"]], "play": a.get("play", True)})
+    if name == "recently_played":
         return sp("GET", "/me/player/recently-played", {"limit": lim(10, 50)})
-    if nome == "mais_ouvidas":
-        return sp("GET", f"/me/top/{a['tipo']}", {"time_range": a.get("periodo", "medium_term"), "limit": lim(10, 50)})
-    if nome == "minhas_playlists":
+    if name == "top_items":
+        return sp("GET", f"/me/top/{a['type']}", {"time_range": a.get("time_range", "medium_term"), "limit": lim(10, 50)})
+    if name == "my_playlists":
         r = sp("GET", "/me/playlists", {"limit": lim(50, 50), "offset": a.get("offset", 0)})
         if isinstance(r, dict) and "items" in r:
-            r["items"] = [{"nome": p.get("name"), "id": p.get("id"), "uri": p.get("uri"),
-                           "dono": (p.get("owner") or {}).get("display_name")} for p in r["items"] if p]
+            r["items"] = [{"name": p.get("name"), "id": p.get("id"), "uri": p.get("uri"),
+                           "owner": (p.get("owner") or {}).get("display_name")} for p in r["items"] if p]
         return r
-    if nome == "itens_playlist":
+    if name == "playlist_items":
         return sp("GET", f"/playlists/{_id(a['playlist_id'])}/items",
                   {"limit": lim(50, 50), "offset": a.get("offset", 0)})
-    if nome == "criar_playlist":
-        nova = sp("POST", "/me/playlists", corpo={
-            "name": a["nome"], "description": a.get("descricao", ""), "public": a.get("publica", False)})
-        if "erro" in nova:
-            return nova
+    if name == "create_playlist":
+        new = sp("POST", "/me/playlists", body={
+            "name": a["name"], "description": a.get("description", ""), "public": a.get("public", False)})
+        if "error" in new:
+            return new
         if a.get("uris"):
-            for lote in em_lotes(a["uris"], 100):
-                sp("POST", f"/playlists/{nova['id']}/items", corpo={"uris": lote})
-        return {"criada": nova.get("name"), "id": nova.get("id"), "uri": nova.get("uri"),
-                "faixas_adicionadas": len(a.get("uris") or [])}
-    if nome == "adicionar_a_playlist":
+            for batch in batches(a["uris"], 100):
+                sp("POST", f"/playlists/{new['id']}/items", body={"uris": batch})
+        return {"created": new.get("name"), "id": new.get("id"), "uri": new.get("uri"),
+                "tracks_added": len(a.get("uris") or [])}
+    if name == "add_to_playlist":
         pid = _id(a["playlist_id"])
-        pos = a.get("posicao")
-        for i, lote in enumerate(em_lotes(a["uris"], 100)):
-            corpo = {"uris": lote}
+        pos = a.get("position")
+        for i, batch in enumerate(batches(a["uris"], 100)):
+            body = {"uris": batch}
             if pos is not None:
-                corpo["position"] = pos + i * 100
-            r = sp("POST", f"/playlists/{pid}/items", corpo=corpo)
-            if "erro" in r:
+                body["position"] = pos + i * 100
+            r = sp("POST", f"/playlists/{pid}/items", body=body)
+            if "error" in r:
                 return r
-        return {"ok": True, "adicionadas": len(a["uris"])}
-    if nome == "remover_da_playlist":
+        return {"ok": True, "added": len(a["uris"])}
+    if name == "remove_from_playlist":
         pid = _id(a["playlist_id"])
-        for lote in em_lotes(a["uris"], 100):
-            r = sp("DELETE", f"/playlists/{pid}/items", corpo={"items": [{"uri": u} for u in lote]})
-            if "erro" in r:
+        for batch in batches(a["uris"], 100):
+            r = sp("DELETE", f"/playlists/{pid}/items", body={"items": [{"uri": u} for u in batch]})
+            if "error" in r:
                 return r
-        return {"ok": True, "removidas": len(a["uris"])}
-    if nome == "reordenar_playlist":
-        return sp("PUT", f"/playlists/{_id(a['playlist_id'])}/items", corpo={
-            "range_start": a["inicio"], "insert_before": a["inserir_antes"], "range_length": a.get("quantidade", 1)})
-    if nome == "editar_playlist":
-        corpo = {k2: a[k1] for k1, k2 in (("nome", "name"), ("descricao", "description"), ("publica", "public")) if k1 in a}
-        return sp("PUT", f"/playlists/{_id(a['playlist_id'])}", corpo=corpo)
-    if nome in ("salvar_na_biblioteca", "remover_da_biblioteca"):
-        metodo = "PUT" if nome == "salvar_na_biblioteca" else "DELETE"
-        for lote in em_lotes(a["uris"], 40):
-            r = sp(metodo, "/me/library", {"uris": ",".join(lote)})
-            if "erro" in r:
+        return {"ok": True, "removed": len(a["uris"])}
+    if name == "reorder_playlist":
+        return sp("PUT", f"/playlists/{_id(a['playlist_id'])}/items", body={
+            "range_start": a["range_start"], "insert_before": a["insert_before"],
+            "range_length": a.get("range_length", 1)})
+    if name == "edit_playlist":
+        body = {k: a[k] for k in ("name", "description", "public") if k in a}
+        return sp("PUT", f"/playlists/{_id(a['playlist_id'])}", body=body)
+    if name in ("save_to_library", "remove_from_library"):
+        method = "PUT" if name == "save_to_library" else "DELETE"
+        for batch in batches(a["uris"], 40):
+            r = sp(method, "/me/library", {"uris": ",".join(batch)})
+            if "error" in r:
                 return r
-        return {"ok": True, "itens": len(a["uris"])}
-    if nome == "esta_na_biblioteca":
+        return {"ok": True, "items": len(a["uris"])}
+    if name == "library_contains":
         r = sp("GET", "/me/library/contains", {"uris": ",".join(a["uris"][:40])})
         return dict(zip(a["uris"], r)) if isinstance(r, list) else r
-    if nome == "musicas_curtidas":
+    if name == "liked_songs":
         return sp("GET", "/me/tracks", {"limit": lim(20, 50), "offset": a.get("offset", 0)})
-    if nome == "artistas_seguidos":
+    if name == "followed_artists":
         return sp("GET", "/me/following", {"type": "artist", "limit": lim(20, 50)})
-    if nome == "albuns_do_artista":
-        return sp("GET", f"/artists/{_id(a['artista_id'])}/albums",
-                  {"include_groups": a.get("tipos", "album,single"), "limit": lim(20, 50)})
-    if nome == "faixas_do_album":
+    if name == "artist_albums":
+        return sp("GET", f"/artists/{_id(a['artist_id'])}/albums",
+                  {"include_groups": a.get("groups", "album,single"), "limit": lim(20, 50)})
+    if name == "album_tracks":
         return sp("GET", f"/albums/{_id(a['album_id'])}/tracks", {"limit": 50})
-    return {"erro": f"Ferramenta desconhecida: {nome}"}
+    return {"error": f"Unknown tool: {name}"}
 
 
 # --------------------------------------------------------------------------
-# Loop do Claude
+# Claude loop
 # --------------------------------------------------------------------------
 
-SISTEMA = """Você controla o Spotify do usuário por voz. O pedido chega transcrito do ditado do iPhone, \
-então pode vir com erros de transcrição em nomes de músicas e artistas: interprete pelo sentido.
+SYSTEM = """You control the user's Spotify by voice. Requests come from iPhone dictation, \
+so song and artist names may be mistranscribed: interpret them by meaning.
 
-Como agir:
-- Execute o pedido de ponta a ponta usando as ferramentas, sem pedir confirmação.
-- Para achar músicas, use 'buscar' com filtros (ex.: track:Nome artist:Nome). A busca devolve no máximo 10 itens.
-- Pedidos vagos ("aquela do filme X", "algo parecido com Y", "músicas pra estudar"): use seu próprio \
-conhecimento musical para escolher faixas concretas e depois busque cada uma. A API de recomendações do \
-Spotify não existe mais, então as sugestões são suas.
-- Para tocar várias músicas, prefira 'tocar' com a lista de uris (tocam em sequência). Use \
-'adicionar_a_fila' quando ele pedir fila ou "depois dessa".
-- "Essa música" se refere ao que está tocando: confira com 'estado_reproducao'.
-- O aparelho padrão é o iPhone (type Smartphone), porque os pedidos vêm do fone dele. Antes de tocar, \
-chame 'dispositivos': se o iPhone não for o ativo, passe o dispositivo_id dele no 'tocar' (ou use \
-'transferir_reproducao' para retomar lá). Só use outro aparelho se ele pedir (ex.: "no computador", "na TV"). \
-Se o iPhone não aparecer na lista, avise em uma frase que o app do Spotify precisa estar aberto no iPhone.
-- A API não permite remover nem reordenar a fila; se pedirem, explique em uma frase.
+How to act:
+- Carry out the request end to end using the tools, without asking for confirmation.
+- To find songs, use 'search' with filters (e.g. track:Name artist:Name). Search returns at most 10 items.
+- Vague requests ("that song from movie X", "something like Y", "music to study to"): use your own \
+music knowledge to pick concrete tracks, then search for each one. Spotify's recommendations API \
+no longer exists, so the picks are yours.
+- To play several songs, prefer 'play' with a list of uris (they play in order). Use 'add_to_queue' \
+when the user asks for the queue or "after this one".
+- "This song" means what is playing now: check it with 'playback_state'.
+- The default device is the iPhone (type Smartphone), because requests come from its headphones. Before \
+playing, call 'devices': if the iPhone is not the active one, pass its device_id to 'play' (or use \
+'transfer_playback' to resume there). Only use another device if the user asks (e.g. "on the computer", \
+"on the TV"). If the iPhone is not in the list, say in one sentence that the Spotify app needs to be open on it.
+- The API cannot remove or reorder queue items; if asked, explain that in one sentence.
 
-Resposta final: UMA frase curta em português do Brasil, natural para ser falada em voz alta pela Siri. \
-Sem markdown, sem emojis, sem listas, sem URIs."""
+Final answer: ONE short sentence, natural to be read aloud by Siri, in the same language the user spoke. \
+No markdown, no emojis, no lists, no URIs."""
 
-cliente = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
+client = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 
 
-def processar(pedido: str) -> str:
-    print(f"PEDIDO: {pedido}", flush=True)
-    mensagens = [{"role": "user", "content": pedido}]
-    for _ in range(MAX_PASSOS):
-        resp = cliente.messages.create(
-            model=MODEL, max_tokens=1500, system=SISTEMA, tools=FERRAMENTAS, messages=mensagens)
+def handle(request_text: str) -> str:
+    print(f"REQUEST: {request_text}", flush=True)
+    messages = [{"role": "user", "content": request_text}]
+    for _ in range(MAX_STEPS):
+        resp = client.messages.create(
+            model=MODEL, max_tokens=1500, system=SYSTEM, tools=TOOLS, messages=messages)
         if resp.stop_reason != "tool_use":
-            texto = " ".join(b.text for b in resp.content if b.type == "text").strip()
-            print(f"RESPOSTA: {texto}", flush=True)
-            return texto or "Feito."
-        mensagens.append({"role": "assistant", "content": resp.content})
-        resultados = []
-        for bloco in resp.content:
-            if bloco.type != "tool_use":
+            text = " ".join(b.text for b in resp.content if b.type == "text").strip()
+            print(f"REPLY: {text}", flush=True)
+            return text or "Done."
+        messages.append({"role": "assistant", "content": resp.content})
+        results = []
+        for block in resp.content:
+            if block.type != "tool_use":
                 continue
             try:
-                saida = enxugar(executar(bloco.name, bloco.input))
-            except Exception as e:  # erro de rede, campo faltando etc.
-                saida = {"erro": f"{type(e).__name__}: {e}"}
-            print(f"FERRAMENTA {bloco.name} {json.dumps(bloco.input, ensure_ascii=False)[:200]} -> "
-                  f"{json.dumps(saida, ensure_ascii=False)[:300]}", flush=True)
-            resultados.append({
+                output = slim(run_tool(block.name, block.input))
+            except Exception as e:  # network error, missing field, etc.
+                output = {"error": f"{type(e).__name__}: {e}"}
+            print(f"TOOL {block.name} {json.dumps(block.input, ensure_ascii=False)[:200]} -> "
+                  f"{json.dumps(output, ensure_ascii=False)[:300]}", flush=True)
+            results.append({
                 "type": "tool_result",
-                "tool_use_id": bloco.id,
-                "content": json.dumps(saida, ensure_ascii=False)[:8000],
+                "tool_use_id": block.id,
+                "content": json.dumps(output, ensure_ascii=False)[:8000],
             })
-        mensagens.append({"role": "user", "content": resultados})
-    return "Não consegui terminar esse pedido, tenta de novo de outro jeito."
+        messages.append({"role": "user", "content": results})
+    return "I couldn't finish that request, try asking another way."
 
 
 # --------------------------------------------------------------------------
-# Rotas HTTP
+# HTTP routes
 # --------------------------------------------------------------------------
 
-def autorizado() -> bool:
-    esperado = os.environ.get("APP_SECRET", "")
-    recebido = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-    return bool(esperado) and hmac.compare_digest(recebido, esperado)
+def authorized() -> bool:
+    expected = os.environ.get("APP_SECRET", "")
+    received = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    return bool(expected) and hmac.compare_digest(received, expected)
 
 
 @app.post("/api/comando")
-def comando():
-    if not autorizado():
-        return jsonify({"resposta": "Senha do atalho incorreta."}), 401
-    pedido = ((request.get_json(silent=True) or {}).get("pedido") or "").strip()
-    if not pedido:
-        return jsonify({"resposta": "Não ouvi nenhum pedido."}), 400
+def command():
+    if not authorized():
+        return jsonify({"resposta": "Wrong shortcut password."}), 401
+    text = ((request.get_json(silent=True) or {}).get("pedido") or "").strip()
+    if not text:
+        return jsonify({"resposta": "I didn't hear a request."}), 400
     try:
-        return jsonify({"resposta": processar(pedido)})
+        return jsonify({"resposta": handle(text)})
     except Exception as e:
-        return jsonify({"resposta": "Deu um erro no servidor.", "detalhe": str(e)[:300]}), 500
+        return jsonify({"resposta": "Server error.", "detail": str(e)[:300]}), 500
 
 
 @app.get("/api/comando")
 @app.get("/")
-def saude():
-    return jsonify({"status": "ok", "modelo": MODEL})
+def health():
+    return jsonify({"status": "ok", "model": MODEL})
 
 
-# A Vercel reescreve todas as rotas para /api/index; aqui POST vira comando e GET vira checagem
-@app.route("/<path:_caminho>", methods=["GET", "POST"])
-def qualquer_rota(_caminho):
-    return comando() if request.method == "POST" else saude()
+# Vercel rewrites every route to /api/index; here POST becomes a command and GET a health check
+@app.route("/<path:_path>", methods=["GET", "POST"])
+def any_route(_path):
+    return command() if request.method == "POST" else health()
