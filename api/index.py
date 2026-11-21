@@ -323,7 +323,7 @@ def executar(nome: str, a: dict):
 # Loop do Claude
 # --------------------------------------------------------------------------
 
-SISTEMA = """Você controla o Spotify do Doc por voz. O pedido chega transcrito do ditado do iPhone, \
+SISTEMA = """Você controla o Spotify do usuário por voz. O pedido chega transcrito do ditado do iPhone, \
 então pode vir com erros de transcrição em nomes de músicas e artistas: interprete pelo sentido.
 
 Como agir:
