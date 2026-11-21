@@ -1,126 +1,134 @@
 # Claude Música
 
-Aperta o fone, fala o que quer, e o Claude faz no seu Spotify.
+A voice agent for Spotify. Press your headphone button, say what you want, and Claude does it.
 
 ```
-Fone (aperto longo) → "E aí Siri, Claude música" → você fala o pedido
-   → Atalho do iPhone → seu servidor na Vercel → Claude decide o que fazer
-   → API do Spotify executa → Siri fala a resposta
+Headphones (long press) → "Hey Siri, Claude música" → you say your request
+   → iPhone Shortcut → your server on Vercel → Claude decides what to do
+   → Spotify API runs it → Siri reads back the answer
 ```
 
-## O que dá pra pedir
+## How it works
 
-* Tocar: "toca Nightcall", "toca aquela do final de Drive", "toca o álbum novo da Rosalía", "toca minha playlist de academia"
-* Controle: "pausa", "pula", "volta", "volta pro começo", "liga o aleatório", "repete essa"
-* Fila: "põe na fila as três mais famosas do Radiohead", "o que vem depois?"
-* Playlists: "cria uma playlist pra estudar com 20 músicas tipo Bonobo", "adiciona essa na playlist X", "tira essa da playlist X", "renomeia a playlist X"
-* Biblioteca: "curte essa", "descurte essa", "segue esse artista", "salva esse álbum"
-* Informação: "que música é essa?", "quais foram minhas mais ouvidas esse mês?", "o que eu ouvi agora há pouco?"
-* Dispositivos: "passa pro computador"
-* Combinações: "cria uma playlist com as minhas 30 mais ouvidas do ano e toca no aleatório"
+The server gives Claude 30 tools, each wrapping a Spotify Web API endpoint (search, play, queue, playlists, library, devices and more). Claude never calls Spotify directly: it asks for a tool call, the server runs it and sends back the result, and Claude decides the next step. This loop repeats until the request is done, so a single sentence can turn into several API calls.
 
-**Limites da própria API do Spotify** (não tem como contornar): não dá pra remover nem reordenar itens da fila, e as recomendações automáticas do Spotify foram desligadas pra apps novos. Nesse caso o próprio Claude escolhe as músicas parecidas e busca uma por uma.
+Spotify responses are trimmed before going back to the model (images, markets and URLs are dropped), which keeps requests fast and cheap. The default model is Claude Haiku 5.5: about 3 seconds and $0.003 per request.
 
-## O que você precisa
+## What you can ask
 
-* Spotify Premium (obrigatório desde 2026 pra apps em modo de desenvolvedor)
-* Conta no [console da Anthropic](https://console.anthropic.com) com créditos (US$ 5 dão pra milhares de pedidos)
-* Conta grátis na [Vercel](https://vercel.com), entrando com o seu GitHub
-* Python instalado no computador (só pro passo 2)
+* Play: "play Nightcall", "play that song from the opening of Drive", "play my gym playlist on shuffle"
+* Control: "pause", "skip", "go back", "restart this song", "turn on shuffle", "repeat this one"
+* Queue: "queue the three most famous Radiohead songs", "what's next?"
+* Playlists: "make a study playlist with 20 songs like Bonobo", "add this to playlist X", "remove this from playlist X", "rename playlist X"
+* Library: "like this song", "unlike this", "follow this artist", "save this album"
+* Info: "what song is this?", "what were my top songs this month?", "what did I listen to earlier?"
+* Devices: "move it to my computer", "play it on the TV"
+* Combos: "make a playlist with my 30 top songs of the year and play it on shuffle"
+
+Claude replies in the language you spoke.
+
+**Limits of the Spotify API itself** (no way around them): queue items can't be removed or reordered, and Spotify's recommendations endpoint is disabled for new apps. Claude picks similar songs from its own music knowledge and searches for each one instead.
+
+## What you need
+
+* Spotify Premium (required since 2026 for apps in development mode)
+* An account on the [Anthropic Console](https://console.anthropic.com) with credits ($5 is enough for thousands of requests)
+* A free [Vercel](https://vercel.com) account, signed in with GitHub
+* Python on your computer (only for step 2)
 
 ---
 
-## Passo 1: criar o app no Spotify (5 min)
+## Step 1: create the Spotify app (5 min)
 
-1. Entre em [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) com a sua conta Premium.
-2. Clique em **Create app**.
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) with your Premium account.
+2. Click **Create app**.
    * App name: `Claude Musica`
-   * Redirect URI: `http://127.0.0.1:8888/callback` (exatamente assim, com 127.0.0.1 e não localhost)
-   * Marque **Web API**.
-3. Salve, entre em **Settings** e copie o **Client ID** e o **Client Secret**.
+   * Redirect URI: `http://127.0.0.1:8888/callback` (exactly like this, with 127.0.0.1 and not localhost)
+   * Check **Web API**.
+3. Save, open **Settings** and copy the **Client ID** and **Client Secret**.
 
-## Passo 2: pegar o refresh token (5 min)
+## Step 2: get the refresh token (5 min)
 
-No terminal, dentro da pasta do projeto:
+In a terminal, inside the project folder:
 
 ```bash
 pip install requests
-python pegar_refresh_token.py SEU_CLIENT_ID SEU_CLIENT_SECRET
+python pegar_refresh_token.py YOUR_CLIENT_ID YOUR_CLIENT_SECRET
 ```
 
-O navegador abre, você autoriza, e o terminal imprime o **refresh token**. Guarde, ele funciona como uma senha.
+Your browser opens, you authorize, and the terminal prints the **refresh token**. Keep it safe, it works like a password.
 
-## Passo 3: criar a chave da API do Claude (3 min)
+## Step 3: create a Claude API key (3 min)
 
-No [console da Anthropic](https://console.anthropic.com), vá em **API Keys** e crie uma chave. Coloque créditos em **Billing**.
+In the [Anthropic Console](https://console.anthropic.com), go to **API Keys** and create a key. Add credits under **Billing**.
 
-## Passo 4: colocar o servidor no ar (10 min)
+## Step 4: deploy the server (10 min)
 
-1. Suba esta pasta pra um repositório **privado** no seu GitHub.
-2. Na Vercel: **Add New → Project**, importe o repositório.
-3. Antes de clicar em Deploy, abra **Environment Variables** e crie:
+1. Fork this repository or push it to your own GitHub.
+2. On Vercel: **Add New → Project**, import the repository.
+3. Before clicking Deploy, open **Environment Variables** and add:
 
-| Nome | Valor |
+| Name | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | chave do passo 3 |
-| `SPOTIFY_CLIENT_ID` | do passo 1 |
-| `SPOTIFY_CLIENT_SECRET` | do passo 1 |
-| `SPOTIFY_REFRESH_TOKEN` | do passo 2 |
-| `APP_SECRET` | uma senha longa que você inventa (ex. gere em um gerador de senhas) |
-| `CLAUDE_MODEL` | opcional; o padrão é `claude-haiku-5-5`, que é o mais rápido. Troque para `claude-sonnet-5-5` se quiser escolhas musicais mais refinadas, com um pouco mais de demora |
+| `ANTHROPIC_API_KEY` | key from step 3 |
+| `SPOTIFY_CLIENT_ID` | from step 1 |
+| `SPOTIFY_CLIENT_SECRET` | from step 1 |
+| `SPOTIFY_REFRESH_TOKEN` | from step 2 |
+| `APP_SECRET` | a long password you make up (use a password generator) |
+| `CLAUDE_MODEL` | optional; default is `claude-haiku-5-5`, the fastest. Switch to `claude-sonnet-5-5` for more refined music picks, at a higher cost and a bit more latency |
 
-4. Deploy. Abra `https://SEU-PROJETO.vercel.app/` no navegador: deve aparecer `{"status": "ok"}`.
+4. Deploy. Open `https://YOUR-PROJECT.vercel.app/` in a browser: you should see `{"status": "ok"}`.
 
-**Teste pelo terminal** (com o Spotify tocando em algum aparelho):
+**Test from the terminal** (with Spotify playing on some device):
 
 ```bash
-curl -X POST https://SEU-PROJETO.vercel.app/api/comando \
-  -H "Authorization: Bearer SUA_APP_SECRET" \
+curl -X POST https://YOUR-PROJECT.vercel.app/api/comando \
+  -H "Authorization: Bearer YOUR_APP_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"pedido": "toca Nightcall do Kavinsky"}'
+  -d '{"pedido": "play Nightcall by Kavinsky"}'
 ```
 
-## Passo 5: criar o atalho no iPhone (5 min)
+## Step 5: create the iPhone Shortcut (5 min)
 
-Abra o app **Atalhos**, toque em **+** e adicione estas ações, nesta ordem:
+Open the **Shortcuts** app, tap **+** and add these actions in this order:
 
-1. **Ditar Texto**
-   * Idioma: Português (Brasil)
-   * Parar de ouvir: Após Pausa
-2. **Obter Conteúdo do URL**
-   * URL: `https://SEU-PROJETO.vercel.app/api/comando`
-   * Toque em "Mostrar Mais":
-     * Método: **POST**
-     * Cabeçalhos: `Authorization` = `Bearer SUA_APP_SECRET`
-     * Corpo da Requisição: **JSON**, com um campo de texto `pedido` cujo valor é a variável **Texto Ditado**
-3. **Obter Valor do Dicionário**
-   * Chave: `resposta` (no dicionário "Conteúdo do URL")
-4. **Falar Texto**, usando o "Valor do Dicionário"
+1. **Dictate Text**
+   * Language: yours
+   * Stop Listening: After Pause
+2. **Get Contents of URL**
+   * URL: `https://YOUR-PROJECT.vercel.app/api/comando`
+   * Tap "Show More":
+     * Method: **POST**
+     * Headers: `Authorization` = `Bearer YOUR_APP_SECRET`
+     * Request Body: **JSON**, with a text field `pedido` whose value is the **Dictated Text** variable
+3. **Get Dictionary Value**
+   * Key: `resposta` (from the "Contents of URL" dictionary)
+4. **Speak Text**, using "Dictionary Value"
 
-Opcional: coloque uma ação **Abrir App → Spotify** logo depois do Ditar Texto, pra garantir que o iPhone esteja disponível pro Spotify quando o pedido chegar.
+Optional: add an **Open App → Spotify** action right after Dictate Text, so the iPhone is visible to Spotify when the request arrives.
 
-Dê o nome **Claude música** ao atalho. Esse nome é a frase que você vai dizer pra Siri.
+Name the shortcut **Claude música** (or anything you like). That name is what you say to Siri.
 
-## Como usar
+## How to use it
 
-Segure o botão do fone (ou o sensor da haste, nos AirPods) → "**Claude música**" → espere o som do ditado → fale o pedido.
+Hold your headphone button (or the stem, on AirPods) → "**Claude música**" → wait for the dictation sound → say your request.
 
-Dica: em Ajustes → Siri, ative "Permitir Siri quando bloqueado", pra funcionar com o celular no bolso.
+Tip: in Settings → Siri, turn on "Allow Siri When Locked" so it works with the phone in your pocket.
 
 ---
 
-## Problemas comuns
+## Troubleshooting
 
-* **A música toca no computador em vez do celular**: o servidor usa o iPhone como aparelho padrão e só toca em outro se você pedir ("toca no computador", "passa pra TV"). Se o iPhone não aparecer pro Spotify, abra o app do Spotify nele uma vez.
-* **Login do Spotify expira**: apps em modo de desenvolvedor recebem um refresh token que vale 180 dias. Depois disso, rode o passo 2 de novo e troque a variável `SPOTIFY_REFRESH_TOKEN` na Vercel.
-* **"Nenhum dispositivo ativo"**: o Spotify do iPhone dorme depois de um tempo parado. Abra o app uma vez e tente de novo. Se acontecer muito, coloque uma ação **Abrir App → Spotify** no começo do atalho (o problema é que ela exige o celular desbloqueado).
-* **Volume não muda**: o iPhone não deixa apps externos controlarem o volume dele. Funciona no computador e em caixas de som.
-* **Erro 403 do Spotify**: confira se a conta que você autorizou no passo 2 é a mesma conta Premium dona do app.
-* **Demora**: pedidos simples levam de 2 a 4 segundos; pedidos com muitas músicas (playlist de 30 faixas) podem levar uns 15.
-* **Siri entende errado o nome do atalho**: troque por um nome mais fácil de pronunciar, tipo "Música Claude" ou "DJ".
+* **Music plays on the computer instead of the phone**: the server uses the iPhone as the default device and only plays elsewhere if you ask ("play it on the computer", "move it to the TV"). If the iPhone doesn't show up for Spotify, open the Spotify app on it once.
+* **Spotify login expires**: development mode apps get a refresh token valid for 180 days. After that, run step 2 again and update `SPOTIFY_REFRESH_TOKEN` on Vercel.
+* **"No active device"**: the Spotify app on the iPhone goes to sleep after a while. Open it once and try again.
+* **Volume doesn't change**: iOS doesn't let external apps control the iPhone volume. It works on computers and speakers.
+* **Spotify error 403**: make sure the account you authorized in step 2 is the same Premium account that owns the app.
+* **Latency**: simple requests take 2 to 4 seconds; requests with many songs (a 30 track playlist) can take around 15.
+* **Siri mishears the shortcut name**: rename it to something easier to say, like "DJ".
 
-## Arquivos
+## Files
 
-* `api/index.py`: o servidor (Claude + 30 ferramentas do Spotify)
-* `pegar_refresh_token.py`: login único no Spotify
-* `vercel.json`, `requirements.txt`: configuração do deploy
+* `api/index.py`: the server (Claude loop + 30 Spotify tools)
+* `pegar_refresh_token.py`: one-time Spotify login
+* `vercel.json`, `requirements.txt`: deployment config
