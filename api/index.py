@@ -349,13 +349,21 @@ No markdown, no emojis, no lists, no URIs."""
 
 client = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
 
+# Prompt caching: the system prompt and tool list are identical on every call,
+# so they are cached and billed at a fraction of the input price after the first call.
+SYSTEM_BLOCKS = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
+TOOLS_CACHED = TOOLS[:-1] + [{**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
+
 
 def handle(request_text: str) -> str:
     print(f"REQUEST: {request_text}", flush=True)
     messages = [{"role": "user", "content": request_text}]
     for _ in range(MAX_STEPS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=1500, system=SYSTEM, tools=TOOLS, messages=messages)
+            model=MODEL, max_tokens=1500, system=SYSTEM_BLOCKS, tools=TOOLS_CACHED, messages=messages)
+        u = resp.usage
+        print(f"USAGE in={u.input_tokens} cache_read={getattr(u, 'cache_read_input_tokens', 0)} "
+              f"cache_write={getattr(u, 'cache_creation_input_tokens', 0)} out={u.output_tokens}", flush=True)
         if resp.stop_reason != "tool_use":
             text = " ".join(b.text for b in resp.content if b.type == "text").strip()
             print(f"REPLY: {text}", flush=True)
